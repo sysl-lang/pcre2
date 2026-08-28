@@ -5,7 +5,7 @@ Perl-compatible regular expressions for [sysl](https://github.com/sysl-lang/sysl
 
 ```
 dependencies {
-  pcre2 { git = "github.com/sysl-lang/pcre2", version = "0.1.0" }
+  pcre2 { git = "github.com/sysl-lang/pcre2", version = "0.1.1" }
 }
 ```
 
@@ -91,7 +91,7 @@ a pattern compiled without it would step bytes — `.` would match one third of 
 ```
 sh/sysl/pcre2/
     pcre2.sysl          the binding
-    tests.sysl          17 tests, each written so only real matching passes it
+    tests.sysl          18 tests, each written so only real matching passes it
     c/
         c.sysl          PCRE2 as C declares it
         shim.h          two lines, and the only C in the package
@@ -131,7 +131,7 @@ link error naming a symbol.
 sysl test .
 ```
 
-Seventeen, and each is written so that only real PCRE2 matching produces the answer — the offsets are
+Eighteen, and each is written so that only real PCRE2 matching produces the answer — the offsets are
 mid-string, the groups are read by number and by name, and the two presets are told apart by subjects
 on which they disagree. A test that only asked "did it match" would pass against an `extern` that
 dropped an argument.

@@ -216,6 +216,12 @@ struct Match
     end(self) -> usize = usize(self.slots[1])
 end Match
 
+// A `(?<name>...)` group, and the number it answers to.
+struct NamedGroup
+    name: string
+    number: usize
+end NamedGroup
+
 // ## A compiled pattern
 
 // **The handle is storage PCRE2 allocated, and this is a `&Regex` with a destructor** — so nothing
@@ -232,6 +238,43 @@ struct Regex
 
     // How many capture groups the pattern has, not counting the whole match.
     group_count(&self) -> usize = self.groups
+
+    // Every `(?<name>...)` the pattern declared, with the number that group was given.
+    //
+    // **Read from PCRE2's name table rather than remembered here**, so a pattern's names come from
+    // the thing that parsed it. The table is one block of fixed-width entries, each holding the
+    // number in its first two bytes — most significant first, which is PCRE2's own order and not the
+    // machine's — and then the name.
+    named_groups(&self) -> &Buf[NamedGroup]
+        var out: &Buf[NamedGroup] = buf()
+
+        var count: u32 = 0
+        var size: u32 = 0
+        var table: *u8 = null
+
+        c.pattern_info(self.code, c.INFO_NAMECOUNT, &count)
+        c.pattern_info(self.code, c.INFO_NAMEENTRYSIZE, &size)
+        c.pattern_info_table(self.code, c.INFO_NAMETABLE, &table)
+
+        if table == null then return out
+
+        for i in 0..<usize(count)
+            val entry = i * usize(size)
+            val number = usize(table[entry]) * 256 + usize(table[entry + 1])
+
+            var name: Buf[u8] = buf()
+            var k = entry + 2
+
+            while table[k] != u8(0)
+                name.push(table[k])
+                k += 1
+
+            from_utf8(name.view()) match
+                Ok(n) -> out.push(NamedGroup(n, number))
+                Err(_) -> ()
+
+        out
+    end named_groups
 
     // The number a `(?<name>...)` group was given, for reading it out of a `Match`.
     //

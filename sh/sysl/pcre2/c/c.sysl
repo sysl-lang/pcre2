@@ -88,6 +88,14 @@ c const
     // What `pcre2_pattern_info` is being asked for.
     INFO_CAPTURECOUNT: u32 = "PCRE2_INFO_CAPTURECOUNT"
 
+    // The three that describe the named groups. **A name table is one block of fixed-width entries**:
+    // `NAMECOUNT` of them, each `NAMEENTRYSIZE` bytes, and each holding the group's number in its
+    // first two bytes — most significant first, whatever the machine's own byte order — followed by
+    // the name, NUL-terminated.
+    INFO_NAMECOUNT:     u32 = "PCRE2_INFO_NAMECOUNT"
+    INFO_NAMEENTRYSIZE: u32 = "PCRE2_INFO_NAMEENTRYSIZE"
+    INFO_NAMETABLE:     u32 = "PCRE2_INFO_NAMETABLE"
+
     // The error codes this binding tells apart. Everything else is reported by number and by the
     // sentence `get_error_message` gives for it.
     ERROR_NOMATCH:     i32 = "PCRE2_ERROR_NOMATCH"
@@ -110,6 +118,12 @@ extern "pcre2_code_free_8" code_free(code: *Code)
 // `uint32_t` for `INFO_CAPTURECOUNT`; the request type decides the width, which is why the parameter
 // is a bare pointer.
 extern "pcre2_pattern_info_8" pattern_info(code: *Code, what: u32, where: *u32) -> i32
+
+// **The same C function, declared a second time for the one request that answers a pointer.**
+// `pcre2_pattern_info` writes through a `void *` whose real type the request decides, and sysl says
+// what a parameter is once — so `INFO_NAMETABLE`, which yields the address of the table rather than a
+// number, needs its own declaration. Both name the same symbol; only the sysl-side type differs.
+extern "pcre2_pattern_info_8" pattern_info_table(code: *Code, what: u32, where: **u8) -> i32
 
 // The number of the group a `(?<name>...)` declared, or `ERROR_NOSUBSTRING`.
 extern "pcre2_substring_number_from_name_8" substring_number_from_name(code: *Code, name: *u8) -> i32

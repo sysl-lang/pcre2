@@ -97,6 +97,38 @@ a_named_group_is_found_by_its_name() =
     assert_eq(m.group(month).unwrap(), "08", "")
     assert(re.group_named("day").is_none(), "and names no day")
 
+// **The name table is read out of PCRE2 rather than remembered**, so this checks the numbers the
+// library assigned and the order it stores them in — which is alphabetical by name, not the order the
+// groups were written. A binding that read the two number bytes in the machine's order rather than
+// PCRE2's would answer 4096 here and pass every other test in this file.
+@test
+the_named_groups_come_back_with_their_numbers() =
+    val re = compile("(?<year>\\d{4})-(?<month>\\d{2})-(?<day>\\d{2})").expect("a pattern")
+    val names = re.named_groups()
+
+    assert_eq(names.len(), usize(3), "three names")
+
+    var seen = 0
+
+    for i in 0..<names.len()
+        val g = names.at(i)
+
+        if g.name == "year" then
+            assert_eq(g.number, usize(1), "year is group 1")
+            seen += 1
+        elif g.name == "month" then
+            assert_eq(g.number, usize(2), "month is group 2")
+            seen += 1
+        elif g.name == "day" then
+            assert_eq(g.number, usize(3), "day is group 3")
+            seen += 1
+
+    assert_eq(seen, 3, "and each is one of the three")
+
+    val none = compile("(\\d+)").expect("a pattern")
+
+    assert_eq(none.named_groups().len(), usize(0), "a pattern with no names has no table")
+
 // -- Walking a subject --------------------------------------------------------------------------
 
 @test
