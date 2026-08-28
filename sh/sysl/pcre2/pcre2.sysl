@@ -1,0 +1,439 @@
+module sh.sysl.pcre2
+
+import sh.sysl.pcre2.c
+import sysl.slices.{as_mut_ptr, as_ptr}
+import sysl.text.{cstring, from_utf8, is_char_boundary}
+import sysl.buf.{Buf, buf}
+
+// Perl-compatible regular expressions, bound to PCRE2.
+//
+// **This is the second regex in the organisation and the difference is the dialect, not the API.**
+// `sysl.regex` in the standard library is a Thompson/Pike engine over POSIX extended syntax: linear
+// time, no pattern that makes it explode, and no `\d`, no lazy quantifier, no lookaround and no
+// backreference. This one is what a person who has written a regular expression anywhere else
+// expects — Perl's syntax, which is very nearly JavaScript's and exactly Ruby's and Python's.
+//
+// **The two have deliberately the same shape**, so a program moves between them by changing an
+// import: `Match` answers `span`, `group`, `text`, `start` and `end`; `Regex` answers `find`,
+// `find_at`, `is_match`, `find_all`, `replace_all` and `split`. Where they differ is where they must:
+// compiling here can fail on things POSIX has no syntax for, and matching here can *run out*, which
+// a Pike VM cannot — so `find` answers a `Result` rather than an `Option`.
+//
+//     import sh.sysl.pcre2.{compile, javascript}
+//
+//     main() -> Result[unit, string]
+//         val re = compile("(\\w+)@([\\w.]+)").map_err(describe)?
+//
+//         re.find("write to ed@example.com today").map_err(describe)? match
+//             Some(m) -> print(m.text(), m.group(1).unwrap(), m.group(2).unwrap())
+//             None -> print("no address")
+//
+// **PCRE2 backtracks, so a pattern can be made to run for a very long time on a short subject.**
+// That is the cost of the dialect and it is not hypothetical: `(a+)+$` against forty `a`s and a `b`
+// is the standard demonstration. This binding therefore gives every pattern a match context with
+// limits set, and an overrun is `MatchLimit` rather than a machine that stops answering. Node has no
+// such limit and this is the one place a program here is straightforwardly safer than one there.
+
+// ## What can go wrong
+
+// A pattern that would not compile, or a match that would not finish.
+enum Error
+    // The pattern is not one, at this byte offset into it, for the reason PCRE2 gives.
+    Pattern(at: usize, message: string)
+
+    // The match used its whole backtracking budget. The pattern and the subject are both legal; the
+    // combination is what costs. See `Limits`.
+    MatchLimit
+
+    // The match nested deeper than its budget allows. Bounds stack rather than time.
+    DepthLimit
+
+    // PCRE2 could not allocate.
+    OutOfMemory
+
+    // Anything else PCRE2 reports, by number and by its own sentence for it. The subject not being
+    // valid UTF-8 arrives here.
+    Other(code: i32, message: string)
+end Error
+
+describe(e: Error) -> string = e match
+    Pattern(at, message) -> s"${message}, at ${at} in the pattern"
+    MatchLimit -> "the match used its whole backtracking budget"
+    DepthLimit -> "the match nested deeper than its budget allows"
+    OutOfMemory -> "out of memory"
+    Other(code, message) -> s"${message} (${code})"
+
+// PCRE2's own words for a code, which is the only account there is of most failures.
+private message_for(code: i32) -> string
+    var b: [256]u8
+
+    val n = c.get_error_message(code, &b[0], 256)
+
+    if n <= 0 then return s"PCRE2 error ${code}"
+
+    from_utf8(b[0..<usize(n)]).unwrap_or("PCRE2 gave a message that is not UTF-8")
+end message_for
+
+private error_for(code: i32) -> Error =
+    if code == c.ERROR_MATCHLIMIT then
+        MatchLimit
+    elif code == c.ERROR_DEPTHLIMIT then
+        DepthLimit
+    elif code == c.ERROR_NOMEMORY then
+        OutOfMemory
+    else
+        Other(code, message_for(code))
+
+// ## How a pattern is read
+
+// The compile-time choices. Each is one flag, and the names are PCRE2's own meanings rather than a
+// re-invention.
+struct Options
+    // Match without regard to case.
+    icase: bool
+
+    // `^` and `$` match beside a newline as well as at the ends of the subject.
+    multiline: bool
+
+    // `.` matches a newline, which it otherwise does not.
+    dotall: bool
+
+    // **`$` matches only at the very end**, rather than also before a final newline. PCRE2's default
+    // is the Perl one — `/foo$/` matches `"foo\n"` — and JavaScript's rule is this one. It is the
+    // difference most likely to be mistaken for a bug, because both behaviours look correct until
+    // the subject happens to end in a newline.
+    dollar_end_only: bool
+
+    // Ignore unescaped whitespace in the pattern and treat `#` as a comment. Perl's `/x`.
+    extended: bool
+
+    // **Make `\d`, `\w`, `\s` and friends Unicode-aware.** Without it they are ASCII: `\d` is `[0-9]`
+    // and nothing else, which is what JavaScript does without the `u` flag and what most programs
+    // mean. With it `\d` matches every decimal digit in Unicode, including Arabic-Indic and Devanagari
+    // ones — correct for text, surprising for a validator.
+    unicode_classes: bool
+
+    // The `options` value these ask for, or'd onto UTF-8 mode. Each name is the header's own, asked
+    // for through `c const` rather than written here as a number.
+    code(self) -> u32
+        var flags = c.UTF
+
+        if self.icase then flags |= c.CASELESS
+        if self.multiline then flags |= c.MULTILINE
+        if self.dotall then flags |= c.DOTALL
+        if self.dollar_end_only then flags |= c.DOLLAR_ENDONLY
+        if self.extended then flags |= c.EXTENDED
+        if self.unicode_classes then flags |= c.UCP
+
+        flags
+    end code
+end Options
+
+// **UTF-8 mode is not an option, because it is not a choice.** A sysl string is UTF-8 by
+// construction, and a pattern compiled without `PCRE2_UTF` would step bytes: `.` would match one
+// third of `☃`, and a character class holding a non-ASCII character would never match anything.
+// Every `Options` above therefore or's `PCRE2_UTF` in, and there is no way to ask for it off.
+
+// Perl's defaults: case-sensitive, `.` stops at a newline, `^` and `$` are the ends of the subject,
+// and `$` also matches before a final newline.
+plain() -> Options = Options(false, false, false, false, false, false)
+
+// **What JavaScript means by the same pattern.** Two of PCRE2's defaults disagree with ECMAScript,
+// and both disagree silently — the pattern compiles either way and merely matches something else:
+//
+//   - **`$`** is the very end in JavaScript, and in Perl is also the position before a final
+//     newline. `/^foo$/.test("foo\n")` is `false` in a browser and true under `plain()`.
+//   - **`\d`** is `[0-9]` in JavaScript however the `u` flag is set, where Perl with `UCP` on takes
+//     every Unicode decimal digit. This preset leaves `UCP` off, which is the JavaScript rule.
+//
+// A binding that ignored both would be right about most patterns and quietly wrong about the two
+// cases a person is least likely to test.
+javascript() -> Options = Options(false, false, false, true, false, false)
+
+// The same with the flags a JavaScript program spells after the slash: `i`, `m` and `s`.
+javascript_with(icase: bool, multiline: bool, dotall: bool) -> Options =
+    Options(icase, multiline, dotall, true, false, false)
+
+// ## What a match runs under
+
+// The budget a match is given. **This is the answer to a backtracking engine's one real hazard**, and
+// it is set on every pattern this package compiles rather than offered as something to remember.
+struct Limits
+    // How many times PCRE2's internal match function may be called. This is the backtracking budget
+    // and is what a pathological pattern exhausts.
+    match_limit: u32
+
+    // How deep backtracking may nest. Bounds stack use, and matters for a pattern with deeply
+    // nested groups over a long subject.
+    depth_limit: u32
+end Limits
+
+// **A million steps and a depth of ten thousand.** PCRE2's own defaults are ten million and the same
+// depth, which on this machine is around a second of solid backtracking before it gives up — long
+// enough that a request handler holding the thread has already failed. A million is generous for
+// every pattern that is not pathological: the whole test suite here runs inside it, and
+// `(a+)+$` against forty characters does not.
+default_limits() -> Limits = Limits(1000000, 10000)
+
+// ## A match
+
+// Where a match landed, and what its groups took.
+//
+// The spans are **byte offsets into the subject**, always on character boundaries, so `s[a..<b]`
+// takes one without a boundary check failing.
+//
+// A group that took no part in the match has no span rather than an empty one at some arbitrary
+// place. `(a)|(b)` against `"b"` leaves group 1 absent, and `Option` is how that is said: there is a
+// real difference between a group that matched nothing and a group that matched the empty string,
+// and `(a*)b` against `"b"` is the second.
+struct Match
+    src: string
+    slots: []int
+
+    // How many groups this match reports, group 0 — the whole match — included. So a pattern with
+    // two capture groups answers 3, whether or not both took part.
+    group_count(self) -> usize = self.slots.len / 2
+
+    span(self, i: usize) -> Option[(usize, usize)]
+        if i >= self.group_count() then return None
+
+        val lo = self.slots[i * 2]
+        val hi = self.slots[i * 2 + 1]
+
+        if lo < 0 || hi < 0 then None else Some((usize(lo), usize(hi)))
+    end span
+
+    group(self, i: usize) -> Option[string] = self.span(i) match
+        Some(s) -> Some(self.src[s.0..<s.1])
+        None -> None
+
+    // The whole match. Group 0 always took part — there would be no `Match` otherwise — so this is
+    // the one place the `Option` is worth unwrapping on the caller's behalf.
+    text(self) -> string = self.group(0).unwrap()
+
+    start(self) -> usize = usize(self.slots[0])
+
+    end(self) -> usize = usize(self.slots[1])
+end Match
+
+// ## A compiled pattern
+
+// **The handle is storage PCRE2 allocated, and this is a `&Regex` with a destructor** — so nothing
+// has to be released by hand and there is no way to forget. The pattern and its match context are
+// freed together when the last reference goes.
+//
+// Compiling is separated from matching because it is the expensive half and a pattern is usually
+// used more than once. A program matching in a loop compiles once outside it.
+struct Regex
+    pattern: string
+    code: *c.Code
+    ctx: *c.MatchContext
+    groups: usize
+
+    // How many capture groups the pattern has, not counting the whole match.
+    group_count(&self) -> usize = self.groups
+
+    // The number a `(?<name>...)` group was given, for reading it out of a `Match`.
+    //
+    //     val m = re.find(s)?.unwrap()
+    //     val year = re.group_named("year").and_then((i) -> m.group(i))
+    group_named(&self, name: string) -> Option[usize]
+        val n = cstring(name)
+        val i = c.substring_number_from_name(self.code, n.ptr)
+
+        if i > 0 then Some(usize(i)) else None
+    end group_named
+
+    // Whether the subject matches anywhere, which is the common question.
+    is_match(&self, s: string) -> Result[bool, Error] = self.find(s).map((m) -> m.is_some())
+
+    // The leftmost match, or nothing.
+    find(&self, s: string) -> Result[Option[Match], Error] = self.find_at(s, 0)
+
+    // The leftmost match at or after a starting position. **The position does not shorten the
+    // subject** — the anchors still speak about the whole of it — so walking a text with this gives
+    // the same answers as one pass over it would.
+    find_at(&self, s: string, from: usize) -> Result[Option[Match], Error]
+        val b = s.bytes
+
+        if from > b.len then return Ok(None)
+
+        val md = c.match_data_from_pattern(self.code, null)
+
+        if md == null then return Err(OutOfMemory)
+
+        val rc = c.do_match(self.code, as_ptr(b), b.len, from, u32(0), md, self.ctx)
+
+        // **Every path frees the match data**, which is why the answer is built into a variable
+        // rather than returned from the branches. There is no `defer` to lean on here.
+        var out: Result[Option[Match], Error] = Ok(None)
+
+        if rc == c.ERROR_NOMATCH
+            out = Ok(None)
+        elif rc < 0
+            out = Err(error_for(rc))
+        else
+            // **The slot count comes from the pattern, not from the match.** PCRE2 answers how many
+            // pairs it *set*, and leaves the rest of the ovector undefined; a trailing group that
+            // took no part would otherwise read as whatever was there before. Sizing by the pattern
+            // and defaulting to `-1` also makes `group_count` the same for every match of one
+            // pattern, which is what JavaScript reports and what a caller indexing by group number
+            // needs.
+            val pairs = self.groups + 1
+            val set = if rc == 0 then pairs else usize(rc)
+            val ov = c.ovector(md)
+
+            var slots: []int = [-1; pairs * 2]
+
+            for i in 0..<(set * 2)
+                val v = ov[i]
+
+                slots[i] = if v == c.UNSET then -1 else int(v)
+
+            out = Ok(Some(Match(s, slots)))
+
+        c.match_data_free(md)
+        out
+    end find_at
+
+    // Every match, left to right and non-overlapping. The next search starts where the last match
+    // ended, except after an **empty** match, which would otherwise be found again forever at the
+    // same place; there the search resumes one character on.
+    //
+    // **That is JavaScript's rule and not PCRE2's.** `pcre2demo.c` retries an empty match at the same
+    // offset with `NOTEMPTY_ATSTART|ANCHORED` before advancing, which can find a longer match where
+    // the empty one was. ECMAScript simply advances, and so does `sysl.regex`; a package answering
+    // differently from both would be its own dialect.
+    find_all(&self, s: string) -> Result[&Buf[Match], Error]
+        var out: &Buf[Match] = buf()
+        var at: usize = 0
+        val src = s.bytes
+        var going = true
+
+        while going
+            self.find_at(s, at)? match
+                None -> going = false
+                Some(m) ->
+                    out.push(m)
+
+                    if m.end() > at then
+                        at = m.end()
+                    else
+                        at = next_boundary(src, m.end())
+
+                    if at > src.len then going = false
+
+        Ok(out)
+    end find_all
+
+    // The pieces between the matches. A pattern that matches the empty string splits between every
+    // character, which is the same rule `find_all` follows and the reason both are written in terms
+    // of it.
+    split(&self, s: string) -> Result[&Buf[string], Error]
+        var out: &Buf[string] = buf()
+        var at: usize = 0
+        val ms = self.find_all(s)?
+
+        for i in 0..<ms.len()
+            val m = ms.at(i)
+
+            out.push(s[at..<m.start()])
+            at = m.end()
+
+        out.push(s[at..<s.len])
+        Ok(out)
+    end split
+
+    // Every match replaced. The replacement text is not a pattern, but it may name the groups the
+    // match found: **`$1` through `$99` and `${name}`, which is JavaScript's syntax**, and `$$` for
+    // a literal dollar. A group that took no part contributes the empty string.
+    replace_all(&self, s: string, with: string) -> Result[string, Error] =
+        self.substitute_with(s, with, c.SUBSTITUTE_GLOBAL)
+
+    // The leftmost match replaced, and the rest of the subject left alone.
+    replace_first(&self, s: string, with: string) -> Result[string, Error] =
+        self.substitute_with(s, with, u32(0))
+
+    // **PCRE2 sizes the answer for us on the second pass, so this never guesses twice.** With
+    // `SUBSTITUTE_OVERFLOW_LENGTH` set, a buffer that was too small comes back as `NOMEMORY` with the
+    // length that *would* have been needed written into the same out-parameter — so the retry is
+    // exact rather than a doubling loop.
+    private substitute_with(&self, s: string, with: string, extra: u32) -> Result[string, Error]
+        val b = s.bytes
+        val r = with.bytes
+        val opts = extra | c.SUBSTITUTE_OVERFLOW_LENGTH | c.SUBSTITUTE_UNSET_EMPTY
+
+        // A first guess that is right for every replacement that does not grow the subject much.
+        var cap = b.len + 64
+
+        loop
+            var out: []u8 = [u8(0); cap]
+            var n = cap
+            val rc = c.substitute(self.code, as_ptr(b), b.len, 0, opts, null, self.ctx,
+                                  as_ptr(r), r.len, as_mut_ptr(out), &n)
+
+            if rc >= 0
+                return from_utf8(out[0..<n]).map_err((_) -> Other(0, "the replacement is not UTF-8"))
+
+            if rc != c.ERROR_NOMEMORY then return Err(error_for(rc))
+
+            // `n` now holds what was needed, including room for a terminator. If it did not grow,
+            // stop rather than loop — PCRE2 has told us something we cannot act on.
+            if n <= cap then return Err(OutOfMemory)
+
+            cap = n
+    end substitute_with
+end Regex
+
+// `pcre2_code_free` and `pcre2_match_context_free`, together, because they were made together.
+impl Drop for Regex
+    drop(self)
+        c.code_free(self.code)
+        c.match_context_free(self.ctx)
+    end drop
+
+// Where the next character starts, for stepping past an empty match. It reads the boundary out of
+// the bytes rather than decoding, because all it needs to know is where a character begins and UTF-8
+// says that in the top two bits of every byte.
+private next_boundary(src: []const u8, at: usize) -> usize
+    var k = at + 1
+
+    while k < src.len && !is_char_boundary(src[k])
+        k += 1
+
+    k
+end next_boundary
+
+// ## Compiling
+
+// A compiled pattern, read as Perl reads it, or what PCRE2 said about why it is not one.
+compile(pattern: string) -> Result[&Regex, Error] = compile_with(pattern, plain(), default_limits())
+
+// The same, reading the pattern as `o` says.
+compile_with(pattern: string, o: Options, limits: Limits) -> Result[&Regex, Error]
+    val p = pattern.bytes
+
+    var code: i32 = 0
+    var at: usize = 0
+
+    val re = c.compile(as_ptr(p), p.len, o.code(), &code, &at, null)
+
+    if re == null then return Err(Pattern(at, message_for(code)))
+
+    // **How many groups the pattern has is asked once, here.** Every match then sizes its slots from
+    // it rather than from what that match happened to set.
+    var groups: u32 = 0
+
+    c.pattern_info(re, c.INFO_CAPTURECOUNT, &groups)
+
+    val ctx = c.match_context_create(null)
+
+    if ctx == null
+        c.code_free(re)
+        return Err(OutOfMemory)
+
+    c.set_match_limit(ctx, limits.match_limit)
+    c.set_depth_limit(ctx, limits.depth_limit)
+
+    Ok(Regex(pattern, re, ctx, usize(groups)))
+end compile_with

@@ -1,0 +1,301 @@
+module sh.sysl.pcre2
+
+// What this binding claims, run by `sysl test .`.
+//
+// **Every case here is chosen so that only real PCRE2 matching produces the answer.** That matters
+// more for a binding than for ordinary code, because the failures a binding has are not the failures
+// a library has: an `extern` that dropped an argument, a constant transcribed for the wrong code-unit
+// width, or an ovector read off by one still compiles, still links, and still answers something. A
+// test that only asked "did it match" would pass against all three.
+//
+// So the offsets below are mid-string, the groups are read by number and by name, and the two
+// presets are told apart by subjects on which they disagree.
+
+// -- The dialect, which is the whole reason this package exists -------------------------------------
+
+// **These five are exactly what `sysl.regex` cannot do.** POSIX ERE has no `\d`, no lazy quantifier,
+// no lookaround, no backreference and no non-capturing group; under it `\d` is a literal `d` and the
+// first two of these would silently match nothing. They are the package's reason for being, so they
+// are the first thing it checks.
+@test
+perl_syntax_is_what_arrives() =
+    val digits = compile("\\d+").expect("\\d+ is a pattern")
+    val m = digits.find("abc123").expect("a match ran").unwrap()
+
+    assert_eq(m.text(), "123", "\\d is a digit, not the letter d")
+    assert_eq(m.start(), usize(3), "and it landed where the digits are")
+
+    val lazy = compile("<(.+?)>").expect("a lazy quantifier is a pattern")
+
+    assert_eq(lazy.find("<a><b>").expect("ran").unwrap().text(), "<a>", "lazy stops at the first >")
+
+    val ahead = compile("foo(?=bar)").expect("lookahead is a pattern")
+
+    assert_eq(ahead.find("foobar").expect("ran").unwrap().text(), "foo", "lookahead matches")
+    assert(ahead.find("foobaz").expect("ran").is_none(), "and does not consume what it looked at")
+
+    val behind = compile("(?<=\\$)\\d+").expect("lookbehind is a pattern")
+
+    assert_eq(behind.find("costs $42").expect("ran").unwrap().text(), "42", "lookbehind matches")
+
+    val doubled = compile("(\\w)\\1").expect("a backreference is a pattern")
+
+    assert_eq(doubled.find("hello").expect("ran").unwrap().text(), "ll", "a backreference matches")
+
+    val group = compile("(?:ab)+").expect("a non-capturing group is a pattern")
+    val g = group.find("abab").expect("ran").unwrap()
+
+    assert_eq(g.text(), "abab", "it repeats")
+    assert_eq(g.group_count(), usize(1), "and captures nothing")
+
+// -- Groups -----------------------------------------------------------------------------------------
+
+// The offsets are the point. A binding that answered `0..len` to anything that matched, or that read
+// the ovector in the wrong order, gives different numbers here.
+@test
+groups_report_where_each_one_landed() =
+    val re = compile("([0-9]+)-([a-z]+)").expect("a pattern")
+    val m = re.find("xx 42-abc yy").expect("ran").unwrap()
+
+    assert_eq(m.group_count(), usize(3), "the whole match and two groups")
+    assert_eq(m.start(), usize(3), "the whole match starts at 3")
+    assert_eq(m.end(), usize(9), "and ends at 9")
+    assert_eq(m.text(), "42-abc", "")
+    assert_eq(m.group(1).unwrap(), "42", "group 1 is the digits")
+    assert_eq(m.group(2).unwrap(), "abc", "group 2 is the letters")
+    assert_eq(m.span(1).unwrap().0, usize(3), "and its span is where they are")
+    assert_eq(m.span(2).unwrap().0, usize(6), "")
+    assert(m.group(3).is_none(), "there is no group 3")
+
+// **A group that took no part is not a group that matched nothing**, and the two are one slot apart
+// in the ovector. This is the distinction `PCRE2_UNSET` carries and the one a binding is most likely
+// to flatten.
+@test
+a_group_that_took_no_part_has_no_span() =
+    val re = compile("(a)|(b)").expect("a pattern")
+    val m = re.find("b").expect("ran").unwrap()
+
+    assert_eq(m.group_count(), usize(3), "both groups are reported whichever matched")
+    assert(m.group(1).is_none(), "group 1 took no part")
+    assert_eq(m.group(2).unwrap(), "b", "group 2 did")
+
+    val empty = compile("(a*)b").expect("a pattern")
+    val e = empty.find("b").expect("ran").unwrap()
+
+    assert(e.group(1).is_some(), "a group CAN match the empty string")
+    assert_eq(e.group(1).unwrap(), "", "and that is different from taking no part")
+
+@test
+a_named_group_is_found_by_its_name() =
+    val re = compile("(?<year>\\d{4})-(?<month>\\d{2})").expect("a pattern")
+    val m = re.find("on 2026-08-28").expect("ran").unwrap()
+
+    val year = re.group_named("year").expect("the pattern names a year")
+    val month = re.group_named("month").expect("and a month")
+
+    assert_eq(m.group(year).unwrap(), "2026", "")
+    assert_eq(m.group(month).unwrap(), "08", "")
+    assert(re.group_named("day").is_none(), "and names no day")
+
+// -- Walking a subject --------------------------------------------------------------------------
+
+@test
+find_at_does_not_shorten_the_subject() =
+    val re = compile("^b").expect("a pattern")
+
+    assert(re.find_at("ab", 1).expect("ran").is_none(),
+           "the anchor still means the start of the whole subject, not of the search")
+
+    val any = compile("[ab]").expect("a pattern")
+
+    assert_eq(any.find_at("ab", 1).expect("ran").unwrap().start(), usize(1), "but the search does start there")
+
+// The empty-match rule, which is the one every engine has to settle and which two of them settle
+// differently. `a*` against `"bb"` finds three: before each `b`, and after the last.
+@test
+find_all_advances_past_an_empty_match() =
+    val re = compile("a*").expect("a pattern")
+    val ms = re.find_all("bb").expect("ran")
+
+    assert_eq(ms.len(), usize(3), "three empty matches, one per position")
+    assert_eq(ms.at(0).start(), usize(0), "")
+    assert_eq(ms.at(1).start(), usize(1), "")
+    assert_eq(ms.at(2).start(), usize(2), "")
+
+    val words = compile("\\w+").expect("a pattern")
+    val found = words.find_all("one two three").expect("ran")
+
+    assert_eq(found.len(), usize(3), "three words")
+    assert_eq(found.at(2).text(), "three", "and the last is the last")
+
+@test
+split_takes_the_pieces_between() =
+    val re = compile("\\s*,\\s*").expect("a pattern")
+    val parts = re.split("a, b ,c").expect("ran")
+
+    assert_eq(parts.len(), usize(3), "three pieces")
+    assert_eq(parts.at(0), "a", "")
+    assert_eq(parts.at(1), "b", "")
+    assert_eq(parts.at(2), "c", "")
+
+    val none = compile("x").expect("a pattern")
+    val whole = none.split("abc").expect("ran")
+
+    assert_eq(whole.len(), usize(1), "a subject with no match is one piece")
+    assert_eq(whole.at(0), "abc", "")
+
+// -- Replacing --------------------------------------------------------------------------------
+
+@test
+replace_all_names_the_groups_it_found() =
+    val re = compile("(\\w+)@(\\w+)").expect("a pattern")
+
+    assert_eq(re.replace_all("a@b and c@d", "$2 at $1").expect("ran"), "b at a and d at c",
+              "every match, with the groups swapped")
+
+    assert_eq(re.replace_first("a@b and c@d", "$2 at $1").expect("ran"), "b at a and c@d",
+              "and the first alone leaves the rest")
+
+    val dollar = compile("x").expect("a pattern")
+
+    assert_eq(dollar.replace_all("x", "$$").expect("ran"), "$", "$$ is a literal dollar")
+
+// A group that took no part contributes nothing rather than the characters that named it.
+@test
+replace_writes_nothing_for_a_group_that_took_no_part() =
+    val re = compile("(a)|(b)").expect("a pattern")
+
+    assert_eq(re.replace_all("b", "[$1$2]").expect("ran"), "[b]", "the absent group is empty")
+
+// **The retry path, which a short subject never reaches.** A replacement longer than the first guess
+// forces `NOMEMORY`, and PCRE2 writes back the exact length needed; a binding that doubled instead
+// would still pass, but one that did not retry at all would fail here and nowhere else.
+@test
+a_replacement_larger_than_the_guess_still_answers() =
+    val re = compile("a").expect("a pattern")
+
+    var subject = ""
+
+    for i in 0..<200
+        subject += "a"
+
+    val out = re.replace_all(subject, "0123456789").expect("ran")
+
+    assert_eq(out.len, usize(2000), "two hundred matches, ten characters each")
+
+// -- The two presets, told apart by what they match ----------------------------------------------
+
+// **`$` is where PCRE2 and JavaScript disagree**, and the disagreement is invisible except on a
+// subject that ends in a newline. Reading the flag back would prove nothing; matching does.
+@test
+javascript_makes_dollar_mean_the_very_end() =
+    val perl = compile_with("foo$", plain(), default_limits()).expect("a pattern")
+    val js = compile_with("foo$", javascript(), default_limits()).expect("a pattern")
+
+    assert(perl.find("foo\n").expect("ran").is_some(), "Perl's $ also matches before a final newline")
+    assert(js.find("foo\n").expect("ran").is_none(), "JavaScript's does not")
+
+    assert(perl.find("foo").expect("ran").is_some(), "and both agree without one")
+    assert(js.find("foo").expect("ran").is_some(), "")
+
+// **`\d` is ASCII unless `UCP` is asked for**, which is JavaScript's rule and the one a validator
+// wants. An Arabic-Indic digit is the shortest thing that tells the two apart.
+@test
+unicode_classes_change_what_a_digit_is() =
+    val ascii = compile_with("^\\d+$", javascript(), default_limits()).expect("a pattern")
+    val unicode = compile_with("^\\d+$", Options(false, false, false, true, false, true), default_limits())
+                    .expect("a pattern")
+
+    assert(ascii.find("٤٢").expect("ran").is_none(), "\\d is [0-9] without UCP")
+    assert(unicode.find("٤٢").expect("ran").is_some(), "and every decimal digit with it")
+    assert(ascii.find("42").expect("ran").is_some(), "both agree about ASCII")
+
+@test
+the_flags_a_program_spells_after_the_slash() =
+    val i = compile_with("hello", javascript_with(true, false, false), default_limits()).expect("a pattern")
+
+    assert(i.find("Hello").expect("ran").is_some(), "i is case-insensitive")
+
+    val m = compile_with("^b", javascript_with(false, true, false), default_limits()).expect("a pattern")
+
+    assert_eq(m.find("a\nb").expect("ran").unwrap().start(), usize(2), "m anchors at a line")
+
+    val s = compile_with("a.b", javascript_with(false, false, true), default_limits()).expect("a pattern")
+
+    assert(s.find("a\nb").expect("ran").is_some(), "s lets . cross a newline")
+
+// -- UTF-8 -----------------------------------------------------------------------------------------
+
+// **A pattern is compiled in UTF-8 mode always**, so `.` is a character rather than a byte and every
+// offset lands on a boundary. Without it `.` would match one third of a snowman and the slice would
+// fail rather than answer wrongly.
+@test
+a_dot_is_a_character_and_offsets_land_on_boundaries() =
+    val re = compile("h.j").expect("a pattern")
+    val m = re.find("hâj").expect("ran").unwrap()
+
+    assert_eq(m.text(), "hâj", "the middle character is one dot, not two bytes")
+    assert_eq(m.end(), usize(4), "and it is two bytes wide, so the match ends at 4")
+
+    val star = compile("é+").expect("a pattern")
+
+    assert_eq(star.find("aéée").expect("ran").unwrap().text(), "éé", "a repeat counts characters")
+
+    // The empty-match walk steps whole characters too, which is what `next_boundary` is for.
+    val empty = compile("x*").expect("a pattern")
+    val ms = empty.find_all("é☃").expect("ran")
+
+    assert_eq(ms.len(), usize(3), "one position per character, and one at the end")
+
+// -- What goes wrong -------------------------------------------------------------------------------
+
+// A pattern that will not compile is a `Result`, and it says where.
+//
+// **The offset is where PCRE2 NOTICED, not where the construct began**, and the two differ for every
+// unterminated thing. `a(b` reports 3 — the end of the pattern, having run out of input looking for
+// the `)` — where `sysl.regex` reports 1, the paren itself. Neither is wrong and a caller pointing at
+// the offset has to know which it has.
+@test
+a_bad_pattern_says_where_it_went_wrong() =
+    val e = compile("a(b").expect_err("an unclosed group is not a pattern")
+
+    e match
+        Pattern(at, message) ->
+            assert_eq(at, usize(3), "the offset is where the pattern ran out, not where the group opened")
+            assert(message.len > 0, "and PCRE2 supplies the sentence")
+        _ -> assert(false, "an unclosed group is a Pattern error")
+
+    val q = compile("*").expect_err("a quantifier with nothing to repeat is not a pattern")
+
+    q match
+        Pattern(_, _) -> assert(true, "")
+        _ -> assert(false, "a stray quantifier is a Pattern error")
+
+// **The backtracking budget, which is the reason this binding sets one at all.** `(a+)+$` against a
+// subject with no `b` is the standard demonstration; with a small limit it is an error in
+// microseconds, and with none it would run for a very long time.
+@test
+a_pathological_pattern_runs_out_rather_than_running_on() =
+    val re = compile_with("(a+)+$", plain(), Limits(1000, 10000)).expect("a pattern")
+
+    var subject = ""
+
+    for i in 0..<40
+        subject += "a"
+
+    subject += "b"
+
+    re.find(subject).expect_err("the budget is spent") match
+        MatchLimit -> assert(true, "")
+        _ -> assert(false, "an exhausted budget is MatchLimit")
+
+    // The same pattern on a subject it matches is not affected by the limit being low.
+    assert(re.find("aaaa").expect("ran").is_some(), "a pattern that matches still matches")
+
+@test
+describe_says_something_for_each_kind() =
+    assert(describe(MatchLimit).len > 0, "")
+    assert(describe(DepthLimit).len > 0, "")
+    assert(describe(OutOfMemory).len > 0, "")
+    assert(describe(Pattern(3, "missing )")).len > 0, "")
+    assert(describe(Other(-8, "no memory")).len > 0, "")

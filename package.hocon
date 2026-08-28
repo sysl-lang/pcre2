@@ -1,0 +1,45 @@
+// Perl-compatible regular expressions, bound to PCRE2.
+//
+// This is the block a *consumer* writes to reach this package:
+//
+//     dependencies {
+//       pcre2 { git = "github.com/sysl-lang/pcre2", version = "0.1.0" }
+//     }
+//
+// The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
+// tag `v0.1.0` on this repository.
+
+// `name` is the package; the module a program imports is `sh.sysl.pcre2`, and the two are
+// deliberately different. The module carries the `sh.sysl.` prefix so that no package claims a
+// top-level word another one might want; the package name is the short one, because it names this
+// repository rather than a namespace.
+package {
+  name    = "pcre2"
+  version = "0.1.0"
+
+  // The oldest compiler this builds with. `c const`, `opaque struct` and `@link` are all older than
+  // this; the floor is the one the package was written and tested against rather than a bisected
+  // minimum.
+  sysl = "0.0.88"
+}
+
+// **`posix`, because PCRE2 is a hosted library.** It allocates, it reads locale tables, and its build
+// assumes a C library. Saying so here turns "this cannot work there" into one refusal before anything
+// is compiled, rather than a link error naming `pcre2_compile_8`.
+//
+// **`heap`, because every handle PCRE2 hands back was allocated by PCRE2.** A compiled pattern, a
+// match context and the match data each match a `free` on the other side, and `Regex`'s destructor is
+// what pairs them. This is the difference between this package and `qrcodegen`, which allocates
+// nothing and therefore names nothing: a capability clause is a claim about what a library *does*.
+//
+// **`pkg_config` is what makes a missing PCRE2 a sentence rather than a link error.** Nothing is
+// vendored here — PCRE2 is half a megabyte of C with its own build system, and every platform
+// packages it — so the library has to be installed, and this is where that is said once.
+requires {
+  heap  = true
+  posix = true
+
+  pkg_config {
+    libpcre2-8 = "PCRE2 — `brew install pcre2` on macOS, Debian's libpcre2-dev, Arch's pcre2"
+  }
+}

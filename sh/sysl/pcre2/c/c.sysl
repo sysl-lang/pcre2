@@ -1,0 +1,158 @@
+// PCRE2 as C reaches it: the handles the library allocates, the functions over them, and the
+// constants `pcre2.h` defines.
+//
+// **Nothing here is meant to be called by a program.** A compiled pattern is a bare pointer, a
+// failure is a negative `int` that has to be turned into a sentence by a second call, and a match
+// comes back as a run of `size_t` offsets that has to be read in pairs. The module above this one
+// turns those into a `&Regex` with a destructor and is what an application imports.
+//
+// **THERE IS NO SHIM, AND THAT IS UNUSUAL ENOUGH TO SAY WHY.** `15 §7` names three shapes reachable
+// from C and from nothing else — a caller-allocated opaque type, a macro used as a value, and a
+// shape with no sysl spelling — and PCRE2 has none of them:
+//
+//   - **Every handle is allocated by the library, not by the caller.** `pcre2_compile` returns a
+//     `pcre2_code *` and `pcre2_code_free` takes it back; the same for match data and match
+//     contexts. So nothing needs a `calloc` wrapper the way `regex_t` does in `sh.sysl.regex`,
+//     whose size is a platform's business. An `opaque struct` is the whole of the declaration.
+//   - **The macros are numbers, and `c const` asks the C compiler for them.**
+//   - **The match offsets are a plain `PCRE2_SIZE *`** — `size_t *`, which is `*usize` here — rather
+//     than a struct with a layout only the header knows. `regmatch_t` is what forces POSIX regex
+//     through a shim; PCRE2 hands over the array itself.
+//
+// So this package vendors nothing and wraps nothing. `c/shim.h` is two lines and exists only to set
+// the code-unit width before `c const` reads the header.
+//
+// **The symbols carry an `_8` suffix and the header's unsuffixed names are macros over them.** That
+// is what makes the no-shim binding possible: `pcre2_compile` is not a symbol, `pcre2_compile_8` is.
+// Each `extern` below therefore names the suffixed form, and a build against the 16- or 32-bit
+// library would resolve nothing.
+
+module sh.sysl.pcre2.c
+
+// PCRE2's 8-bit library. Installed rather than vendored — the library is half a megabyte of C with
+// its own build system, and every platform packages it. `package.hocon`'s `pkg_config` block is
+// what turns a missing one into a sentence at build time.
+@link("pcre2-8")
+
+@include("shim.h")
+
+// ## The handles
+//
+// Three, each allocated by PCRE2 and freed by it. `opaque struct` publishes no layout, so nothing
+// can read a field or make one by hand, and a `MatchData` cannot be passed where a `Code` is wanted.
+
+// A compiled pattern.
+opaque struct Code
+
+// Where a match writes its offsets. Sized from the pattern it was made for, so it always has room
+// for that pattern's groups.
+opaque struct MatchData
+
+// The limits a match runs under. PCRE2 backtracks, so this is the thing that makes a pathological
+// pattern answer an error instead of running until the machine gives up.
+opaque struct MatchContext
+
+// ## The constants
+//
+// Every one is a `#define`, so there is no symbol for any of them and the numbers below are the
+// header's rather than this file's.
+
+c const
+    // Compile options.
+    CASELESS:        u32 = "PCRE2_CASELESS"
+    MULTILINE:       u32 = "PCRE2_MULTILINE"
+    DOTALL:          u32 = "PCRE2_DOTALL"
+    DOLLAR_ENDONLY:  u32 = "PCRE2_DOLLAR_ENDONLY"
+    EXTENDED:        u32 = "PCRE2_EXTENDED"
+    UTF:             u32 = "PCRE2_UTF"
+    UCP:             u32 = "PCRE2_UCP"
+
+    // Match options.
+    ANCHORED:        u32 = "PCRE2_ANCHORED"
+    NOTEMPTY_ATSTART: u32 = "PCRE2_NOTEMPTY_ATSTART"
+
+    // Substitute options.
+    SUBSTITUTE_GLOBAL:          u32 = "PCRE2_SUBSTITUTE_GLOBAL"
+    SUBSTITUTE_OVERFLOW_LENGTH: u32 = "PCRE2_SUBSTITUTE_OVERFLOW_LENGTH"
+    SUBSTITUTE_UNSET_EMPTY:     u32 = "PCRE2_SUBSTITUTE_UNSET_EMPTY"
+
+    // A length meaning "the string is NUL-terminated, measure it yourself". This binding always
+    // passes a real length, so it is here for completeness rather than use.
+    ZERO_TERMINATED: usize = "PCRE2_ZERO_TERMINATED"
+
+    // What an ovector slot holds for a group that took no part in the match. It is `SIZE_MAX`, so a
+    // binding reading the slots as signed integers would see `-1`; this one compares against the
+    // constant instead.
+    UNSET: usize = "PCRE2_UNSET"
+
+    // What `pcre2_pattern_info` is being asked for.
+    INFO_CAPTURECOUNT: u32 = "PCRE2_INFO_CAPTURECOUNT"
+
+    // The error codes this binding tells apart. Everything else is reported by number and by the
+    // sentence `get_error_message` gives for it.
+    ERROR_NOMATCH:     i32 = "PCRE2_ERROR_NOMATCH"
+    ERROR_NOMEMORY:    i32 = "PCRE2_ERROR_NOMEMORY"
+    ERROR_MATCHLIMIT:  i32 = "PCRE2_ERROR_MATCHLIMIT"
+    ERROR_DEPTHLIMIT:  i32 = "PCRE2_ERROR_DEPTHLIMIT"
+    ERROR_NOSUBSTRING: i32 = "PCRE2_ERROR_NOSUBSTRING"
+
+// ## Compiling
+//
+// `errorcode` and `erroroffset` are written on failure and are the only account of what went wrong:
+// the return is null and says nothing. `ccontext` is a compile context this binding never needs, so
+// every call passes null.
+
+extern "pcre2_compile_8" compile(pattern: *u8, length: usize, options: u32, errorcode: *i32, erroroffset: *usize, ccontext: *u8) -> *Code
+
+extern "pcre2_code_free_8" code_free(code: *Code)
+
+// How many capture groups the pattern has, not counting the whole match. `where` is written as a
+// `uint32_t` for `INFO_CAPTURECOUNT`; the request type decides the width, which is why the parameter
+// is a bare pointer.
+extern "pcre2_pattern_info_8" pattern_info(code: *Code, what: u32, where: *u32) -> i32
+
+// The number of the group a `(?<name>...)` declared, or `ERROR_NOSUBSTRING`.
+extern "pcre2_substring_number_from_name_8" substring_number_from_name(code: *Code, name: *u8) -> i32
+
+// ## Matching
+
+extern "pcre2_match_data_create_from_pattern_8" match_data_from_pattern(code: *Code, gcontext: *u8) -> *MatchData
+
+extern "pcre2_match_data_free_8" match_data_free(md: *MatchData)
+
+// The count of pairs written on success, or a negative code. **Zero means the ovector was too small
+// for every group**, which cannot happen to match data made from the pattern.
+extern "pcre2_match_8" do_match(code: *Code, subject: *u8, length: usize, startoffset: usize, options: u32, md: *MatchData, mcontext: *MatchContext) -> i32
+
+// The offsets themselves: `2 * count` of them, a start and an end for each group in turn. The
+// storage belongs to the match data and dies with it, which is why the layer above copies out.
+extern "pcre2_get_ovector_pointer_8" ovector(md: *MatchData) -> *usize
+
+extern "pcre2_get_ovector_count_8" ovector_count(md: *MatchData) -> u32
+
+// ## Limits
+//
+// A match context carries them. Without one PCRE2 uses its build-time defaults, which are high
+// enough that a pathological pattern is a hang rather than an error.
+
+extern "pcre2_match_context_create_8" match_context_create(gcontext: *u8) -> *MatchContext
+
+extern "pcre2_match_context_free_8" match_context_free(mc: *MatchContext)
+
+// How many times the internal match function may be called. This is the backtracking budget.
+extern "pcre2_set_match_limit_8" set_match_limit(mc: *MatchContext, limit: u32) -> i32
+
+// How deep the backtracking may nest. Bounds stack use rather than time.
+extern "pcre2_set_depth_limit_8" set_depth_limit(mc: *MatchContext, limit: u32) -> i32
+
+// ## Replacing
+//
+// `outlength` is in-out: the caller's capacity going in, and on success the length written, or on
+// `ERROR_NOMEMORY` with `SUBSTITUTE_OVERFLOW_LENGTH` set, the length that would have been needed.
+extern "pcre2_substitute_8" substitute(code: *Code, subject: *u8, length: usize, startoffset: usize, options: u32, md: *MatchData, mcontext: *MatchContext, replacement: *u8, rlength: usize, outbuf: *u8, outlength: *usize) -> i32
+
+// ## Saying what went wrong
+//
+// The library's own words for a negative code, written into storage the caller owns — the same shape
+// as `strerror_r`. Answers the length written, or a negative code if the buffer was too small.
+extern "pcre2_get_error_message_8" get_error_message(code: i32, buf: *u8, len: usize) -> i32
