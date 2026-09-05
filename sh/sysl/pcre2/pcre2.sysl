@@ -359,7 +359,14 @@ struct Regex
                 Some(m) ->
                     out.push(m)
 
-                    if m.end() > at then
+                    // **The test is whether the MATCH is empty, not whether it ended ahead of the
+                    // cursor.** `find_at` is unanchored, so an empty match is often found some way
+                    // past where the search began -- `/$/` searched from 0 answers [3,3] on a
+                    // three-byte subject. Comparing against `at` calls that one "progress" and
+                    // resumes at 3, which is exactly where the empty match is, so the next search
+                    // finds it a second time. Comparing against `m.start()` asks the question that
+                    // was always meant: did this match consume anything?
+                    if m.end() > m.start() then
                         at = m.end()
                     else
                         at = next_boundary(src, m.end())

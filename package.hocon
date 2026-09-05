@@ -3,7 +3,7 @@
 // This is the block a *consumer* writes to reach this package:
 //
 //     dependencies {
-//       pcre2 { git = "github.com/sysl-lang/pcre2", version = "0.1.1" }
+//       pcre2 { git = "github.com/sysl-lang/pcre2", version = "0.1.2" }
 //     }
 //
 // The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
@@ -15,7 +15,7 @@
 // repository rather than a namespace.
 package {
   name    = "pcre2"
-  version = "0.1.1"
+  version = "0.1.2"
 
   // The oldest compiler this builds with. `c const`, `opaque struct` and `@link` are all older than
   // this; the floor is the one the package was written and tested against rather than a bisected

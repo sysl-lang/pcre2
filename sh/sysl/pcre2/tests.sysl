@@ -160,6 +160,83 @@ find_all_advances_past_an_empty_match() =
     assert_eq(found.len(), usize(3), "three words")
     assert_eq(found.at(2).text(), "three", "and the last is the last")
 
+// **An empty match found AHEAD of the cursor was reported twice, up to 0.1.1.** `find_at` is
+// unanchored, so `/$/` searched from 0 answers [3,3] on a three-byte subject; the walk compared that
+// end against the offset it had searched *from*, called it progress, and resumed at 3 -- which is
+// where the empty match is, so the next search found it again. The two patterns below are the
+// reproductions; the two under them never showed it, because their empty matches are found *at* the
+// cursor rather than ahead of it, which is exactly why one comparison passed for years.
+@test
+an_empty_match_ahead_of_the_cursor_is_reported_once() =
+    val dollar = compile("$").expect("a pattern")
+    val ends = dollar.find_all("abc").expect("ran")
+
+    assert_eq(ends.len(), usize(1), "the end of the subject is one place, not two")
+    assert_eq(ends.at(0).start(), usize(3), "")
+    assert_eq(ends.at(0).end(), usize(3), "")
+
+    val word = compile("\\b").expect("a pattern")
+    val bounds = word.find_all("ab cd").expect("ran")
+
+    assert_eq(bounds.len(), usize(4), "four word boundaries in 'ab cd'")
+    assert_eq(bounds.at(0).start(), usize(0), "")
+    assert_eq(bounds.at(1).start(), usize(2), "")
+    assert_eq(bounds.at(2).start(), usize(3), "")
+    assert_eq(bounds.at(3).start(), usize(5), "")
+
+    // The controls. Both were right before the fix and must stay right after it -- a repair that
+    // moved these would have traded one wrong answer for another.
+    val star = compile("a*").expect("a pattern")
+    val bab = star.find_all("bab").expect("ran")
+
+    assert_eq(bab.len(), usize(4), "empty at 0, 'a' at 1, empty at 2, empty at 3")
+    assert_eq(bab.at(1).text(), "a", "the one non-empty match is the 'a'")
+
+    val opt = compile("x?").expect("a pattern")
+
+    assert_eq(opt.find_all("ab").expect("ran").len(), usize(3), "one per position, and one at the end")
+
+// `split` walks by calling `find_all`, so it carried the same defect and is the reason this is not
+// only a `find_all` test: a doubled zero-width match put an extra empty piece in the answer.
+@test
+split_on_a_zero_width_boundary_takes_every_piece() =
+    val word = compile("\\b").expect("a pattern")
+    val parts = word.split("ab cd").expect("ran")
+
+    assert_eq(parts.len(), usize(5), "four boundaries cut a subject into five pieces")
+    assert_eq(parts.at(0), "", "before the first boundary there is nothing")
+    assert_eq(parts.at(1), "ab", "")
+    assert_eq(parts.at(2), " ", "")
+    assert_eq(parts.at(3), "cd", "")
+    assert_eq(parts.at(4), "", "and nothing after the last")
+
+// **The cross-check whose absence let this live: two independent walks must agree on HOW MANY.**
+// `find_all` is this file's own loop; `replace_all` is PCRE2's `SUBSTITUTE_GLOBAL`, which does its
+// own iteration inside the C library and never touches the code above. So the number of matches one
+// finds and the number of substitutions the other makes are the same question asked of two
+// implementations -- and a walk that reports a match twice disagrees immediately. Every assertion
+// here is over a pattern that can match empty, which is the only case where the two could differ.
+@test
+find_all_and_replace_all_agree_on_how_many() =
+    val subjects = ["abc", "ab cd", "bab", "", "é☃"]
+    val patterns = ["$", "^", "\\b", "a*", "x?", ""]
+
+    for pi in 0..<patterns.len
+        val re = compile(patterns[pi]).expect("a pattern")
+
+        for si in 0..<subjects.len
+            val subject = subjects[si]
+            val mine = re.find_all(subject).expect("ran").len()
+
+            // A marker that appears in no subject, so counting it counts substitutions.
+            val marked = re.replace_all(subject, "#").expect("ran")
+            var theirs: usize = 0
+
+            for b in marked.bytes
+                if b == u8('#') then theirs += 1
+
+            assert_eq(mine, theirs, s"/${patterns[pi]}/ over \"${subject}\": find_all and replace_all disagree")
+
 @test
 split_takes_the_pieces_between() =
     val re = compile("\\s*,\\s*").expect("a pattern")
