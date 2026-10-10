@@ -262,7 +262,7 @@ struct Regex
             val entry = i * usize(size)
             val number = usize(table[entry]) * 256 + usize(table[entry + 1])
 
-            var name: Buf[u8] = buf()
+            val name: Buf[u8] = buf()
             var k = entry + 2
 
             while table[k] != u8(0)

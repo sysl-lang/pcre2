@@ -5,7 +5,7 @@ Perl-compatible regular expressions for [sysl](https://github.com/sysl-lang/sysl
 
 ```
 dependencies {
-  pcre2 { git = "github.com/sysl-lang/pcre2", version = "0.1.3" }
+  pcre2 { git = "github.com/sysl-lang/pcre2", version = "0.1.4" }
 }
 ```
 
