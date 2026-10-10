@@ -326,7 +326,7 @@ struct Regex
             val set = if rc == 0 then pairs else usize(rc)
             val ov = c.ovector(md)
 
-            var slots: []int = [-1; pairs * 2]
+            val slots: []int = [-1; pairs * 2]
 
             for i in 0..<(set * 2)
                 val v = ov[i]
@@ -417,7 +417,7 @@ struct Regex
         var cap = b.len + 64
 
         loop
-            var out: []u8 = [u8(0); cap]
+            val out: []u8 = [u8(0); cap]
             var n = cap
             val rc = c.substitute(self.code, as_ptr(b), b.len, 0, opts, null, self.ctx,
                                   as_ptr(r), r.len, as_mut_ptr(out), &n)
