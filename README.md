@@ -3,6 +3,8 @@
 Perl-compatible regular expressions for [sysl](https://github.com/sysl-lang/sysl), bound to
 [PCRE2](https://github.com/PCRE2Project/pcre2).
 
+*An independent sysl package for PCRE2. It is not affiliated with or endorsed by PCRE2's authors or trademark holders.*
+
 ```
 dependencies {
   pcre2 { git = "github.com/sysl-lang/pcre2", version = "0.1.4" }
