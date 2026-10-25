@@ -3,7 +3,7 @@
 // This is the block a *consumer* writes to reach this package:
 //
 //     dependencies {
-//       pcre2 { git = "github.com/sysl-lang/pcre2", version = "0.1.4" }
+//       pcre2 { git = "github.com/sysl-lang/pcre2", version = "0.1.5" }
 //     }
 //
 // The coordinate is identity rather than a URL, so it carries no `https://`, and the version is the
@@ -15,12 +15,12 @@
 // repository rather than a namespace.
 package {
   name    = "pcre2"
-  version = "0.1.4"
+  version = "0.1.5"
 
   // The oldest compiler this builds with. `c const`, `opaque struct` and `@link` are all older than
   // this; the floor is the one the package was written and tested against rather than a bisected
   // minimum.
-  sysl = "0.1.0-alpha.8"
+  sysl = "0.6.0"
 }
 
 // **`posix`, because PCRE2 is a hosted library.** It allocates, it reads locale tables, and its build

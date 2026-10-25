@@ -7,7 +7,7 @@ Perl-compatible regular expressions for [sysl](https://github.com/sysl-lang/sysl
 
 ```
 dependencies {
-  pcre2 { git = "github.com/sysl-lang/pcre2", version = "0.1.4" }
+  pcre2 { git = "github.com/sysl-lang/pcre2", version = "0.1.5" }
 }
 ```
 
@@ -97,7 +97,7 @@ sh/sysl/pcre2/
     c/
         c.sysl          PCRE2 as C declares it
         shim.h          two lines, and the only C in the package
-package.hocon           who this package is, and what it needs of the machine
+sysl.hocon              who this package is, and what it needs of the machine
 ```
 
 **There is no shim, which is unusual enough to say why.** A binding normally needs C for one of three
@@ -124,7 +124,7 @@ brew install pcre2
 ```
 
 Debian and Ubuntu package it as `libpcre2-dev`, Arch as `pcre2`, Alpine as `pcre2-dev`. The
-`pkg_config` block in `package.hocon` turns a missing one into a sentence at build time rather than a
+`pkg_config` block in `sysl.hocon` turns a missing one into a sentence at build time rather than a
 link error naming a symbol.
 
 ## Tests
